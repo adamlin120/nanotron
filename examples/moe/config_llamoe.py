@@ -18,37 +18,14 @@ from nanotron.config import (
     RandomInit,
     TokenizerArgs,
     TokensArgs,
+    LlamaConfig
 )
 from nanotron.config.config import PretrainDatasetsArgs
 from nanotron.logging import human_format
 
 
 @dataclass
-class LlaMoEConfig:
-    """Configuration for a LLAMA model
-
-    Be careful on having a coherent typing as we use it to reconstruct the model from yaml
-    """
-
-    bos_token_id: int = 1
-    eos_token_id: int = 2
-    hidden_act: str = "silu"
-    hidden_size: int = 4096
-    initializer_range: float = 0.02
-    intermediate_size: int = 11008
-    is_llamoe_config: bool = True  # We use this help differentiate models in yaml/python conversion
-    max_position_embeddings: int = 2048
-    num_attention_heads: int = 32
-    num_hidden_layers: int = 32
-    num_key_value_heads: Optional[int] = None
-    pad_token_id: Optional[int] = None
-    pretraining_tp: int = 1
-    rms_norm_eps: float = 1e-6
-    rope_scaling: Optional[dict] = None
-    tie_word_embeddings: bool = False
-    use_cache: bool = True
-    vocab_size: int = 32000
-
+class LlaMoEConfig(LlamaConfig):
     ## MoE specific
     # Number of experts per Sparse MLP layer.
     moe_num_experts: int = 1
@@ -56,38 +33,56 @@ class LlaMoEConfig:
     num_experts_per_tok: int = 1
     moe_capacity_factor: int = 1
 
-    def __post_init__(self):
-        # for backward compatibility
-        if self.num_key_value_heads is None:
-            self.num_key_value_heads = self.num_attention_heads
-
-        assert (
-            self.num_experts_per_tok <= self.moe_num_experts
-        ), f"num_experts_per_tok ({self.num_experts_per_tok}) must be <= moe_num_experts ({self.moe_num_experts})"
-
 
 model_config = LlaMoEConfig(
     # Config for a 52M llama model
-    num_hidden_layers=1,
-    hidden_size=512,
-    num_attention_heads=8,
-    intermediate_size=512 * 4,
-    max_position_embeddings=128,
+    num_hidden_layers=16,
+    hidden_size=1024,
+    num_attention_heads=16,
+    num_key_value_heads=16,
+    rms_norm_eps=1e-05,
+    intermediate_size=1024 * 4,
+    max_position_embeddings=2048,
     tie_word_embeddings=False,
     vocab_size=32000,
-    moe_num_experts=4,
+    moe_num_experts=8,
+    num_experts_per_tok=2,
 )
 
 num_params = human_format(
     model_config.vocab_size * model_config.hidden_size * 2
     + model_config.num_hidden_layers
     * (
-        3 * model_config.hidden_size * model_config.intermediate_size
-        + 4 * model_config.hidden_size * model_config.hidden_size
+        # router
+        model_config.moe_num_experts * model_config.hidden_size
+        +
+        # expert
+        model_config.moe_num_experts * 3 * model_config.hidden_size * model_config.intermediate_size
+        +
+        # layernorm
+        2 * model_config.hidden_size
+        +
+        4 * model_config.hidden_size * model_config.hidden_size
+    )
+).replace(".", "p")
+num_active_params = human_format(
+    model_config.vocab_size * model_config.hidden_size * 2
+    + model_config.num_hidden_layers
+    * (
+        # router
+        model_config.moe_num_experts * model_config.hidden_size
+        +
+        # expert
+        model_config.num_experts_per_tok * 3 * model_config.hidden_size * model_config.intermediate_size
+        +
+        # layernorm
+        2 * model_config.hidden_size
+        +
+        4 * model_config.hidden_size * model_config.hidden_size
     )
 ).replace(".", "p")
 
-print(f"Model has {num_params} parameters")
+print(f"Model has {num_params} total parameters and {num_active_params} active parameters")
 
 SEED = 42
 
@@ -110,10 +105,10 @@ optimizer = OptimizerArgs(
 )
 
 parallelism = ParallelismArgs(
-    dp=1,
+    dp=32,
     pp=1,
-    tp=2,
-    expert_parallel_size=2,
+    tp=1,
+    expert_parallel_size=1,
     pp_engine="1f1b",
     tp_mode="ALL_REDUCE",
     tp_linear_async_communication=False,
@@ -123,17 +118,18 @@ assert (
     model_config.moe_num_experts % parallelism.expert_parallel_size == 0
 ), "Number of experts must be divisible by expert_parallel_size"
 
-tokens = TokensArgs(sequence_length=256, train_steps=1918, micro_batch_size=256, batch_accumulation_per_replica=2)
+tokens = TokensArgs(sequence_length=2048, train_steps=1918, micro_batch_size=16, batch_accumulation_per_replica=8)
 
 data = DataArgs(
     seed=SEED,
     num_loading_workers=1,
     # dataset=None
     dataset=PretrainDatasetsArgs(
-        hf_dataset_or_datasets="roneneldan/TinyStories",
+        hf_dataset_or_datasets="HuggingFaceTB/cosmopedia_6M",
+        # hf_dataset_config_name="auto_math_text",
         hf_dataset_splits="train",
         text_column_name="text",
-        dataset_processing_num_proc_per_process=12,
+        dataset_processing_num_proc_per_process=128,
     ),
 )
 
@@ -142,12 +138,12 @@ checkpoints_path = os.path.dirname(os.path.dirname(__file__)) + "/checkpoints"
 os.makedirs(checkpoints_path, exist_ok=True)
 
 config = Config(
-    general=GeneralArgs(project="moe", run="llamoe", seed=SEED),
+    general=GeneralArgs(project="moe", run="llamoe-cosmopedia", seed=SEED),
     checkpoints=CheckpointsArgs(
         checkpoints_path=checkpoints_path,
         checkpoint_interval=100000,
         save_initial_state=True,
-        resume_checkpoint_path=checkpoints_path,
+        # resume_checkpoint_path=checkpoints_path,
     ),
     parallelism=parallelism,
     model=ModelArgs(init_method=RandomInit(std=0.025), model_config=model_config),
