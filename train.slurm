@@ -11,7 +11,7 @@
 echo "START TIME: $(date)"
 
 declare -a ARGS=(
-	--container-image /mnt/home/f08944064/axolotl_main.sqsh
+	--container-image /mnt/home/f08944064/nanotron/image.sqsh
 	--container-mounts /mnt/home/f08944064/nanotron:/workspace/axolotl,/mnt/home/f08944064/.cache/huggingface:/root/.cache/huggingface,/mnt/:/mnt/
 	--container-writable
 )
@@ -56,6 +56,7 @@ LAUNCHER="python -u -m torch.distributed.run \
 
 # EDIT the path+name of the python script and whatever args it needs
 # EDIT the path+name of the python script and whatever args it needs
+export CUDA_DEVICE_MAX_CONNECTIONS=1 # important for some distributed operations
 export PROGRAM="\
     examples/moe/train_moe.py --config-file examples/moe/config_llamoe.yaml \
 "
@@ -92,5 +93,6 @@ SRUN_ARGS=" \
 srun \
     $SRUN_ARGS \
     bash -c \
-    "pip install packaging; pip install 'flash-attn>=2.5.0'  --no-build-isolation; pip install -e . ; pip install megablocks; $CMD" 2>&1 | tee -a $LOG_PATH
+    "pip install -e . ; $CMD" 2>&1 | tee -a $LOG_PATH
+    # "pip install packaging; pip install 'flash-attn>=2.5.0'  --no-build-isolation; pip install -e . ; pip install megablocks; $CMD" 2>&1 | tee -a $LOG_PATH
 echo "END TIME: $(date)"
