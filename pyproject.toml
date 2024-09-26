@@ -20,7 +20,8 @@ dependencies = [
     "packaging",
     "safetensors",
     "dacite",
-    "tqdm"
+    "tqdm",
+    "datasets",
 ]
 
 [tool.setuptools.packages.find]
@@ -45,6 +46,18 @@ test = [
 
 fast-modeling = [
     "flash-attn>=2.5.0",
+]
+
+nanosets = [
+     "transformers",
+     "datatrove[io,processing]@git+https://github.com/huggingface/datatrove",
+     "numba",
+]
+
+s3 = [
+    "boto3",
+    "s3fs",
+    "s5cmd",
 ]
 
 [build-system]

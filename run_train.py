@@ -10,12 +10,10 @@ torchrun --nproc_per_node=8 run_train.py --config-file examples/config_tiny_llam
 import argparse
 from typing import Dict, cast
 
+import numpy as np
 from nanotron import logging
-from nanotron.config import (
-    DataArgs,
-    DatasetStageArgs,
-    PretrainDatasetsArgs,
-)
+from nanotron.config import DataArgs, DatasetStageArgs, NanosetDatasetsArgs, PretrainDatasetsArgs
+from nanotron.data.dataloader_builder import build_nanoset_dataloader
 from nanotron.dataloader import (
     clm_process,
     dummy_infinite_data_generator,
@@ -102,6 +100,11 @@ def get_dataloader_from_data_stage(
             tokenizer.pad_token = tokenizer.eos_token
             tokenizer.padding_side = "left"
 
+            # Check that tokenizer's vocab size is smaller than the model's vocab size
+            assert (
+                tokenizer.vocab_size <= trainer.model_config.vocab_size
+            ), f"Tokenizer's vocab size ({tokenizer.vocab_size}) is larger than the model's vocab size ({trainer.model_config.vocab_size})"
+
             # We apply the Causal Language Modeling preprocessing
             train_dataset = clm_process(
                 raw_dataset=raw_dataset,
@@ -133,8 +136,42 @@ def get_dataloader_from_data_stage(
             )
             assert num_tokens_needed_for_training <= total_tokens_dataset, (
                 f"Dataset is too small for steps ({total_tokens_dataset} < {num_tokens_needed_for_training}), "
-                f"Try train_steps<={len(dataloader.dataset) // trainer.global_batch_size + trainer.start_iteration_step}"
+                f"Try train_steps<={len(dataloader.dataset) // trainer.global_batch_size + trainer.iteration_step}"
             )
+
+    # Case 3: Nanosets
+    elif isinstance(data.dataset, NanosetDatasetsArgs):
+        # Get tokenizer cardinality
+        tokenizer = AutoTokenizer.from_pretrained(trainer.config.tokenizer.tokenizer_name_or_path)
+        token_size = 4 if len(tokenizer) > np.iinfo(np.uint16).max + 1 else 2
+        del tokenizer
+        # Create Nanoset
+        from nanotron.data.nanoset import Nanoset
+
+        with main_rank_first(trainer.parallel_context.world_pg):
+            train_dataset = Nanoset(
+                dataset_folders=data.dataset.dataset_folder,
+                dataset_weights=data.dataset.dataset_weights,
+                sequence_length=trainer.sequence_length,
+                token_size=token_size,
+                train_split_num_samples=trainer.config.tokens.train_steps * trainer.global_batch_size,
+                random_seed=data.seed,
+            )
+
+        # Prepare dataloader
+        train_dataloader = build_nanoset_dataloader(
+            train_dataset,
+            trainer.sequence_length,
+            parallel_context=trainer.parallel_context,
+            input_pp_rank=input_pp_rank,
+            output_pp_rank=output_pp_rank,
+            micro_batch_size=trainer.micro_batch_size,
+            consumed_train_samples=consumed_train_samples,
+            dataloader_num_workers=data.num_loading_workers,
+            dataloader_drop_last=True,
+        )
+
+        return train_dataloader
     else:
         raise ValueError(f"Unhandled case of `self.config.data.dataset`. Got: {data.dataset}")
 

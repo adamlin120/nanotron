@@ -8,6 +8,7 @@ import dacite
 import torch
 import yaml
 from dacite import from_dict
+from datasets.download.streaming_download_manager import xPath
 from yaml.loader import SafeLoader
 
 from nanotron.config.lighteval_config import LightEvalConfig
@@ -92,10 +93,38 @@ class PretrainDatasetsArgs:
 
 
 @dataclass
+class S3UploadArgs:
+    """Arguments related to uploading checkpoints on s3"""
+
+    upload_s3_path: xPath
+    remove_after_upload: bool
+    s5cmd_numworkers: Optional[int]
+    s5cmd_concurrency: Optional[int]
+    s5cmd_path: Optional[xPath]
+
+    def __post_init__(self):
+        if isinstance(self.upload_s3_path, str):
+            self.upload_s3_path = xPath(self.upload_s3_path)
+        if isinstance(self.s5cmd_path, str):
+            self.s5cmd_path = xPath(self.s5cmd_path)
+
+
+@dataclass
+class NanosetDatasetsArgs:
+    dataset_folder: Union[str, List[str]]
+    dataset_weights: Optional[List[float]] = None
+
+    def __post_init__(self):
+        if isinstance(self.dataset_folder, str):  # Case 1: 1 Dataset folder
+            self.dataset_folder = [self.dataset_folder]
+            self.dataset_weights = [1]
+
+
+@dataclass
 class DataArgs:
     """Arguments related to the data and data files processing"""
 
-    dataset: Optional[PretrainDatasetsArgs]
+    dataset: Optional[Union[PretrainDatasetsArgs, NanosetDatasetsArgs]]
     seed: Optional[int]
     num_loading_workers: Optional[int] = 1
 
@@ -123,20 +152,20 @@ class CheckpointsArgs:
     checkpoints_path: where to save the checkpoints
     checkpoint_interval: how often to save the checkpoints
     resume_checkpoint_path: if you want to load from a specific checkpoint path
-
     """
 
     checkpoints_path: Path
     checkpoint_interval: int
     save_initial_state: Optional[bool] = False
-    resume_checkpoint_path: Optional[Path] = None
+    save_final_state: Optional[bool] = False
+    resume_checkpoint_path: Optional[xPath] = None
     checkpoints_path_is_shared_file_system: Optional[bool] = False
 
     def __post_init__(self):
         if isinstance(self.checkpoints_path, str):
-            self.checkpoints_path = Path(self.checkpoints_path)
+            self.checkpoints_path = xPath(self.checkpoints_path)
         if isinstance(self.resume_checkpoint_path, str):
-            self.resume_checkpoint_path = Path(self.resume_checkpoint_path)
+            self.resume_checkpoint_path = xPath(self.resume_checkpoint_path)
 
 
 @dataclass
@@ -232,7 +261,7 @@ class LRSchedulerArgs:
 
     lr_warmup_steps: number of steps to warmup the learning rate
     lr_warmup_style: linear or constant
-    lr_decay_style: linear or cosine
+    lr_decay_style: linear, cosine or 1-sqrt
     min_decay_lr: minimum learning rate after decay
     lr_decay_steps: optional number of steps to decay the learning rate otherwise will default to train_steps - lr_warmup_steps
     lr_decay_starting_step: optional number of steps to decay the learning rate otherwise will default to train_steps - lr_warmup_steps
@@ -255,9 +284,9 @@ class LRSchedulerArgs:
             self.lr_warmup_style = "linear"
         if self.lr_decay_style is None:
             self.lr_decay_style = "linear"
-        if self.lr_decay_style not in ["linear", "cosine"]:
+        if self.lr_decay_style not in ["linear", "cosine", "1-sqrt"]:
             raise ValueError(
-                f"lr_decay_style should be a string selected in ['linear', 'cosine'] and not {self.lr_decay_style}"
+                f"lr_decay_style should be a string selected in ['linear', 'cosine', '1-sqrt'] and not {self.lr_decay_style}"
             )
         if self.min_decay_lr is None:
             self.min_decay_lr = self.learning_rate
@@ -322,6 +351,7 @@ class Config:
     data_stages: Optional[List[DatasetStageArgs]] = None
     profiler: Optional[ProfilerArgs] = None
     lighteval: Optional[LightEvalConfig] = None
+    s3_upload: Optional[S3UploadArgs] = None
 
     @classmethod
     def create_empty(cls):
@@ -329,6 +359,10 @@ class Config:
         return cls(**{f.name: None for f in cls_fields})
 
     def __post_init__(self):
+
+        if self.s3_upload is not None:
+            self.s3_upload.__post_init__()
+
         # Some final sanity checks across separate arguments sections:
         if self.profiler is not None and self.profiler.profiler_export_path is not None:
             assert self.tokens.train_steps < 10
